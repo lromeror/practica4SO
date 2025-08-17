@@ -1,4 +1,4 @@
-// emisor.c (Versión final con paquete FIN explícito y robusto)
+// emisor.c (Versión Final Completa)
 
 // Macro para activar las funciones POSIX modernas
 #define _POSIX_C_SOURCE 200809L
@@ -37,11 +37,12 @@ int main(int argc, char *argv[]) {
 
     struct addrinfo hints, *servinfo, *p;
     int rv;
-    struct sockaddr_in serv_addr;
+    // Usamos sockaddr_storage porque es lo suficientemente grande para IPv4 e IPv6
+    struct sockaddr_storage serv_addr_storage;
     socklen_t serv_len;
 
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC; // Acepta IPv4 o IPv6
     hints.ai_socktype = SOCK_DGRAM;
 
     if ((rv = getaddrinfo(host_destino, puerto_str, &hints, &servinfo)) != 0) {
@@ -49,18 +50,20 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
     
+    // Tomamos la primera dirección que nos devuelve getaddrinfo
     p = servinfo;
     if (p == NULL) {
         fprintf(stderr, "emisor: no se pudo encontrar una dirección para el host\n");
         exit(1);
     }
     
-    memcpy(&serv_addr, p->ai_addr, sizeof(struct sockaddr_in));
+    memcpy(&serv_addr_storage, p->ai_addr, p->ai_addrlen);
     serv_len = p->ai_addrlen;
     freeaddrinfo(servinfo);
 
+    // Configurar el timeout
     struct timeval tv;
-    tv.tv_sec = 2;
+    tv.tv_sec = 2; // Timeout de 2 segundos. Debería ser suficiente.
     tv.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
@@ -74,19 +77,32 @@ int main(int argc, char *argv[]) {
         paquete_envio.seq_num = seq_num;
         paquete_envio.data_len = bytes_leidos;
         paquete_envio.is_ack = 0;
-        paquete_envio.is_fin = 0; // La bandera FIN no se usa para paquetes de datos
+        paquete_envio.is_fin = 0;
 
         int intentos = 0;
         while (1) {
             printf("Enviando paquete de datos seq_num: %u (tamaño: %u)\n", seq_num, (unsigned int)bytes_leidos);
             sendto(sock, &paquete_envio, sizeof(paquete_t), 0,
-                   (struct sockaddr*)&serv_addr, serv_len);
+                   (struct sockaddr*)&serv_addr_storage, serv_len);
 
-            ssize_t ack_bytes = recvfrom(sock, &paquete_ack, sizeof(paquete_t), 0, NULL, NULL);
+            // Preparamos para recibir la respuesta y la dirección del remitente
+            struct sockaddr_storage from_addr;
+            socklen_t from_len = sizeof(from_addr);
+            ssize_t ack_bytes = recvfrom(sock, &paquete_ack, sizeof(paquete_t), 0, 
+                                         (struct sockaddr*)&from_addr, &from_len);
 
             if (ack_bytes > 0 && paquete_ack.is_ack && paquete_ack.ack_num == seq_num) {
                 printf("ACK para seq_num: %u recibido.\n", seq_num);
-                break;
+                
+                // --- CAMBIO CLAVE ---
+                // Si es el primer ACK, actualizamos la dirección de destino.
+                // El hilo del receptor nos habrá respondido desde un puerto nuevo.
+                if (seq_num == 0) {
+                    printf("Conectado al hilo del receptor. Actualizando puerto de destino.\n");
+                    memcpy(&serv_addr_storage, &from_addr, from_len);
+                    serv_len = from_len;
+                }
+                break; // Salimos del bucle de retransmisión
             } else if (ack_bytes < 0) {
                 printf("Timeout! Retransmitiendo paquete %u (intento %d)\n", seq_num, ++intentos);
             } else {
@@ -103,27 +119,26 @@ int main(int argc, char *argv[]) {
         seq_num++;
     }
 
-    // --- SECCIÓN CORREGIDA Y MEJORADA ---
     // El bucle de datos ha terminado. Ahora enviamos un paquete de control FIN.
     printf("Fin del archivo. Enviando paquete FIN con seq_num: %u\n", seq_num);
     paquete_envio.seq_num = seq_num;
-    paquete_envio.data_len = 0; // Cero datos
+    paquete_envio.data_len = 0;
     paquete_envio.is_ack = 0;
-    paquete_envio.is_fin = 1;   // Bandera FIN activada
+    paquete_envio.is_fin = 1;
 
     int intentos_fin = 0;
     while(1) {
-        sendto(sock, &paquete_envio, sizeof(paquete_t), 0, (struct sockaddr*)&serv_addr, serv_len);
+        sendto(sock, &paquete_envio, sizeof(paquete_t), 0, (struct sockaddr*)&serv_addr_storage, serv_len);
         
         ssize_t ack_bytes = recvfrom(sock, &paquete_ack, sizeof(paquete_t), 0, NULL, NULL);
 
         if (ack_bytes > 0 && paquete_ack.is_ack && paquete_ack.ack_num == seq_num) {
             printf("ACK para el paquete FIN recibido. Transferencia completada.\n");
-            break; // ¡Éxito!
+            break;
         }
         
         if (++intentos_fin > 10) {
-            fprintf(stderr, "No se recibió ACK para el paquete FIN. Asumiendo éxito, pero podría haber un problema.\n");
+            fprintf(stderr, "No se recibió ACK para el paquete FIN. Asumiendo éxito.\n");
             break;
         }
         printf("Timeout en paquete FIN, retransmitiendo...\n");
