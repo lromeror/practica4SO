@@ -106,7 +106,7 @@ int main(int argc, char *argv[]) {
             } else if (ack_bytes < 0) {
                 printf("Timeout! Retransmitiendo paquete %u (intento %d)\n", seq_num, ++intentos);
             } else {
-                printf("ACK incorrecto recibido (esperaba %u, recibí %u). Ignorando...\n", seq_num, paquete_ack.ack_num);
+                //ack incorrecto, lo ignoramos y esperamos el timeout
             }
             
             if (intentos >= 10) {
